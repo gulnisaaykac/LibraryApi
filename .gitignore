@@ -1,0 +1,9 @@
+bin/
+obj/
+.vs/
+*.user
+*.suo
+appsettings.Development.json
+_tmp_*.txt
+KALAN-ADIMLAR.md
+swagger-ui/
