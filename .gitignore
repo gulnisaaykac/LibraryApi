@@ -7,3 +7,4 @@ appsettings.Development.json
 _tmp_*.txt
 KALAN-ADIMLAR.md
 swagger-ui/
+App_Data/uploads/
