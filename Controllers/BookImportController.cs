@@ -1,5 +1,7 @@
 ﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using System.Text;
+using UglyToad.PdfPig;
 
 namespace LibraryApi.Controllers;
 
@@ -46,6 +48,54 @@ public class BookImportController : ControllerBase//controllerbase http cevaplar
             fileName = file.FileName,
             progress = 25, //ilerleme kutusında yüzde 25
             message = "PDF yuklendi (gecici)."
+        });
+    }
+
+    [HttpPost("{fileId}/extract")]
+    public IActionResult Extract(string fileId)
+    {
+        if (string.IsNullOrWhiteSpace(fileId))
+            return BadRequest("fileId gerekli.");
+
+        // Guvenlik: sadece hex id (path traversal engeli)
+        if (fileId.Length != 32 || !fileId.All(Uri.IsHexDigit))
+            return BadRequest("Gecersiz fileId.");
+
+        var pdfPath = Path.Combine(_env.ContentRootPath, "App_Data", "uploads", fileId + ".pdf");//dosya yolu
+        if (!System.IO.File.Exists(pdfPath))//dosya yoksa 404
+            return NotFound("PDF bulunamadi. Once upload yap.");
+        
+
+        var sb = new StringBuilder();
+        int pageCount;
+
+        using (var document = PdfDocument.Open(pdfPath))//pdfi aç  -- using--> iş bitince dosyyı bırak
+        {
+            pageCount = document.NumberOfPages;
+            var maxPages = Math.Min(10, pageCount); //taranacak sayfa sayisi burda belirtiliyor
+
+            for (var i = 1; i <= maxPages; i++)
+            {
+                var page = document.GetPage(i);
+                var text = page.Text?.Trim() ?? "";
+
+                sb.AppendLine($"## Sayfa {i}"); //basit markdown baslik
+                sb.AppendLine();
+                sb.AppendLine(text);
+                sb.AppendLine();
+            }
+        }
+
+        var markdown = sb.ToString().Trim();
+
+        return Ok(new
+        {
+            fileId,
+            pageCount,
+            pagesUsed = Math.Min(10, pageCount),
+            text = markdown,
+            progress = 50,
+            message = "PDF metne cevrildi (ilk sayfalar)."
         });
     }
 }
