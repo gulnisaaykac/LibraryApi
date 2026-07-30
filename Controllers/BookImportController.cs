@@ -1,4 +1,6 @@
-﻿using Microsoft.AspNetCore.Authorization;
+﻿using Library.DataAccess;
+using Library.DataAccess.Models;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using System.Net.Http.Headers;
 using System.Text;
@@ -15,15 +17,21 @@ public class BookImportController : ControllerBase//controllerbase http cevaplar
     private readonly IWebHostEnvironment _env;//proje klasörünün yolunu bilen ASP.NET servisi
     private readonly IHttpClientFactory _httpClientFactory; //groq a istek 
     private readonly IConfiguration _config; //groq:Apikey - model okumak
+    private readonly BookRepository _books;//DI
+    private readonly CityRepository _cities;//DI
 
     public BookImportController(//constructor
         IWebHostEnvironment env,
         IHttpClientFactory httpClientFactory,
-        IConfiguration config)
+        IConfiguration config,
+        BookRepository books,
+        CityRepository cities)
     {
         _env = env;
         _httpClientFactory = httpClientFactory;
         _config = config;
+        _books = books;
+        _cities = cities;//bu parametreler atilmazsa field hep null kalır finalize da patlar
     }
 
 
@@ -219,12 +227,102 @@ public class BookImportController : ControllerBase//controllerbase http cevaplar
             message = "AI bilgileri cikardi."
         });
     }
-}/* akış özeti
+
+    [HttpPost("{fileId}/finalize")]
+    public IActionResult Finalize(string fileId, [FromBody] FinalizeImportRequest request)
+    {
+        if (string.IsNullOrEmpty(fileId))
+            return BadRequest("file ID gerekli");
+
+        if (fileId.Length !=32 || !fileId.All(Uri.IsHexDigit))
+            return BadRequest("Geçersiz File ID");
+
+        if (request== null) //body hiç gelmemiş json bozuk
+            return BadRequest("body gerekli");
+
+        if (string.IsNullOrWhiteSpace(request.Title) ||string.IsNullOrWhiteSpace(request.Author))
+            return BadRequest("title ve author zorunlu");
+
+        var pdfPath = Path.Combine(_env.ContentRootPath, "App_Data", "uploads", fileId + ".pdf");
+        if(!System.IO.File.Exists(pdfPath))
+            return NotFound("Pdf bulunamadi önce upload yap");/*geçici dosyalar hala duruyor mu? 
+                                                               yoksa zaten silinmiş yanlış id 404
+                                                                finalize hem kaydedip hem de geçici 
+                                                                pdf i sileceği için önce kontrol et */
+
+        var city = _cities.EnsureCity(request.City ?? "");
+
+        var book = new Book
+        {
+            Title = request.Title.Trim(),
+            Author = request.Author.Trim(),
+            Category = (request.Category ?? "").Trim(),
+            City = city.Name    //id vermşyoruz sql insert sonrası olacak
+        };
+
+        var bookId = _books.InsertBook(book);
+
+        System.IO.File.Delete(pdfPath);//geçici pdf i sil 
+
+        return Ok(new
+        {
+            fileId,
+            bookId,
+            title = book.Title,
+            author = book.Author,
+            category = book.Category,
+            city = book.City,
+            progress = 100,
+            message = "Kitap kaydedildi, gecici PDF silindi."
+        });
+    }
+
+}/* akış özeti --Fİnalize öncesi 
   * 
   * fileId kontrol
-    → PDF bul
-    → ilk 10 sayfa metin
-    → Groq’a gönder
-    → JSON’dan title/author/category/city al
-    → progress: 75
+    - PDF bul
+    - ilk 10 sayfa metin
+    - Groq’a gönder
+    - JSON’dan title/author/category/city al
+    - progress: 75
 */
+
+//altta yaptığımız şey finalize a gelecek JSON un c# karşılığı
+
+public class FinalizeImportRequest // Body için DTO/ istek modeli
+{
+
+    public string City { get; set; }
+    public string Title { get; set; }
+    public string Author { get; set; }
+    public string Category { get; set; }
+    
+}
+
+
+//neden ayri classlar kullandık kullanmasak bu kadar net okumazdı bodyi elle parçalamak gerirdi ZOR
+
+//daha hızlı olması adına LibraryApi/Models içerisine değil buraya atadım çünkü sadece burada kullanılacak eğer ihtiyaç olursa oraya taşırım
+
+
+
+
+/*fileId + body (title/author/category/city)
+        │
+        ▼
+   kontroller (id, body, title/author)
+        │
+        ▼                                            
+   PDF var mı?
+        │
+        ▼
+   EnsureCity  →  gerekirse Cities'e ekle
+        │
+        ▼
+   InsertBook  →  Books'a yaz, bookId al
+        │
+        ▼
+   PDF sil
+        │
+        ▼
+   200 + progress: 100*/
