@@ -19,19 +19,25 @@ public class BookImportController : ControllerBase//controllerbase http cevaplar
     private readonly IConfiguration _config; //groq:Apikey - model okumak
     private readonly BookRepository _books;//DI
     private readonly CityRepository _cities;//DI
+    private readonly CategoryRepository _categories;//DI
+    private readonly QuizRepository _quiz;//quiz sorularini kaydetmek icin
 
     public BookImportController(//constructor
         IWebHostEnvironment env,
         IHttpClientFactory httpClientFactory,
         IConfiguration config,
         BookRepository books,
-        CityRepository cities)
+        CityRepository cities,
+        CategoryRepository categories,
+        QuizRepository quiz)
     {
         _env = env;
         _httpClientFactory = httpClientFactory;
         _config = config;
         _books = books;
         _cities = cities;//bu parametreler atilmazsa field hep null kalır finalize da patlar
+        _categories = categories;
+        _quiz = quiz;
     }
 
 
@@ -91,7 +97,7 @@ public class BookImportController : ControllerBase//controllerbase http cevaplar
         using (var document = PdfDocument.Open(pdfPath))//pdfi aç  -- using--> iş bitince dosyyı bırak
         {
             pageCount = document.NumberOfPages;
-            var maxPages = Math.Min(10, pageCount); //taranacak sayfa sayisi burda belirtiliyor
+            var maxPages = pageCount; //taranacak sayfa sayisi burda belirtiliyor
 
             for (var i = 1; i <= maxPages; i++)
             {
@@ -111,10 +117,10 @@ public class BookImportController : ControllerBase//controllerbase http cevaplar
         {
             fileId,
             pageCount,
-            pagesUsed = Math.Min(10, pageCount),
+            pagesUsed = pageCount,
             text = markdown,
             progress = 50,
-            message = "PDF metne cevrildi (ilk sayfalar)."
+            message = "PDF metne cevrildi (tum sayfalar)."
         });
     }
 
@@ -137,7 +143,7 @@ public class BookImportController : ControllerBase//controllerbase http cevaplar
 
         using (var document = UglyToad.PdfPig.PdfDocument.Open(pdfPath))//PdfPig ile PDF aç 
         {
-            var maxPages = Math.Min(10, document.NumberOfPages);//en fazla 10 sayfa
+            var maxPages = document.NumberOfPages;//en fazla 10 sayfa
             for (var i = 1; i<= maxPages; i++)
             {
                 var page = document.GetPage(i);
@@ -166,7 +172,8 @@ public class BookImportController : ControllerBase//controllerbase http cevaplar
         var systemPrompt =
             "You extract book metadata from PDF text. " +
             "Reply with ONLY valid JSON, no markdown, no extra text. " +
-            "JSON keys: title, author, category, city. " +
+            "JSON keys: title, author, category, city, summary. " +
+            "summary: 2-4 paragraph overview of the book in Turkish. " +
             "If unknown, use empty string. category should be a short genre. " +
             "city is publication/print city if mentioned, else empty string.";
 
@@ -223,10 +230,178 @@ public class BookImportController : ControllerBase//controllerbase http cevaplar
             author = Get("author"),
             category = Get("category"),
             city = Get("city"),
+            summary = Get("summary"),
             progress = 75,
             message = "AI bilgileri cikardi."
         });
     }
+
+    [HttpPost("{fileId}/cover")]
+    public async Task<IActionResult> Cover(string fileId, [FromBody] CoverImportRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(fileId))
+            return BadRequest("fileId gerekli.");
+
+        if (fileId.Length != 32 || !fileId.All(Uri.IsHexDigit))
+            return BadRequest("Gecersiz fileId.");
+
+        if (request == null || string.IsNullOrWhiteSpace(request.Title))
+            return BadRequest("title gerekli.");
+
+        var title = request.Title.Trim();
+        var author = (request.Author ?? "").Trim();
+        var query = string.IsNullOrWhiteSpace(author) ? title : $"{title} {author}";
+
+        var client = _httpClientFactory.CreateClient();
+        var url =
+            "https://openlibrary.org/search.json?limit=1&q=" +
+            Uri.EscapeDataString(query);
+
+        using var resp = await client.GetAsync(url);
+        var respText = await resp.Content.ReadAsStringAsync();
+
+        string coverUrl = "";
+
+        if (resp.IsSuccessStatusCode)
+        {
+            using var doc = JsonDocument.Parse(respText);
+            if (doc.RootElement.TryGetProperty("docs", out var docs) &&
+                docs.GetArrayLength() > 0)
+            {
+                var first = docs[0];
+                if (first.TryGetProperty("cover_i", out var coverId) &&
+                    coverId.ValueKind == JsonValueKind.Number)
+                {
+                    coverUrl = $"https://covers.openlibrary.org/b/id/{coverId.GetInt32()}-L.jpg";
+                }
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(coverUrl))
+            coverUrl = "https://covers.openlibrary.org/b/id/0-L.jpg";
+
+        return Ok(new
+        {
+            fileId,
+            coverUrl,
+            progress = 80,
+            message = "Kapak URL bulundu."
+        });
+    }
+
+    [HttpPost("{fileId}/quiz")]
+    public async Task<IActionResult> Quiz(string fileId, [FromBody] QuizImportRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(fileId))
+            return BadRequest("fileId gerekli.");
+
+        if (fileId.Length != 32 || !fileId.All(Uri.IsHexDigit))
+            return BadRequest("Gecersiz fileId.");
+
+        if (request == null || string.IsNullOrWhiteSpace(request.Title))
+            return BadRequest("title gerekli.");
+
+        var apiKey = _config["Groq:ApiKey"];
+        var model = _config["Groq:Model"] ?? "llama-3.3-70b-versatile";
+
+        if (string.IsNullOrWhiteSpace(apiKey) || apiKey.Contains("BURAYA"))
+            return StatusCode(500, "Groq ApiKey ayarli degil.");
+
+        var systemPrompt =
+            "You create a quiz about a book. " +
+            "Reply with ONLY valid JSON, no markdown. " +
+            "JSON shape: { \"questions\": [ ... ] }. " +
+            "Create exactly 20 questions. Each question object keys: " +
+            "questionText, optionA, optionB, optionC, optionD, correctOption, explanation, sortOrder. " +
+            "correctOption must be A, B, C, or D. " +
+            "explanation is a short Turkish explanation of the correct answer. " +
+            "sortOrder is 1 to 20. Questions and options in Turkish.";
+
+        var userContent =
+            $"Title: {request.Title}\n" +
+            $"Author: {request.Author}\n" +
+            $"Summary:\n{request.Summary}";
+
+        var requestBody = new
+        {
+            model,
+            temperature = 0.3,
+            response_format = new { type = "json_object" },
+            messages = new object[]
+            {
+            new { role = "system", content = systemPrompt },
+            new { role = "user", content = userContent }
+            }
+        };
+
+        var client = _httpClientFactory.CreateClient();
+
+        using var req = new HttpRequestMessage(
+            HttpMethod.Post,
+            "https://api.groq.com/openai/v1/chat/completions");
+
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+        req.Content = new StringContent(
+            JsonSerializer.Serialize(requestBody),
+            Encoding.UTF8,
+            "application/json");
+
+        using var resp = await client.SendAsync(req);
+        var respText = await resp.Content.ReadAsStringAsync();
+
+        if (!resp.IsSuccessStatusCode)
+            return StatusCode((int)resp.StatusCode, "Groq hatasi: " + respText);
+
+        using var doc = JsonDocument.Parse(respText);
+        var content = doc.RootElement
+            .GetProperty("choices")[0]
+            .GetProperty("message")
+            .GetProperty("content")
+            .GetString() ?? "{}";
+
+        using var quizJson = JsonDocument.Parse(content);
+
+        if (!quizJson.RootElement.TryGetProperty("questions", out var questionsEl) ||
+            questionsEl.ValueKind != JsonValueKind.Array)
+            return BadRequest("AI quiz formati hatali.");
+
+        var questions = new List<object>();
+        var order = 1;
+
+        foreach (var q in questionsEl.EnumerateArray())
+        {
+            string Get(string name) =>
+                q.TryGetProperty(name, out var p) ? (p.GetString() ?? "") : "";
+
+            var sortOrder = order;
+            if (q.TryGetProperty("sortOrder", out var so) && so.TryGetInt32(out var n) && n > 0)
+                sortOrder = n;
+
+            questions.Add(new
+            {
+                questionText = Get("questionText"),
+                optionA = Get("optionA"),
+                optionB = Get("optionB"),
+                optionC = Get("optionC"),
+                optionD = Get("optionD"),
+                correctOption = Get("correctOption"),
+                explanation = Get("explanation"),
+                sortOrder
+            });
+
+            order++;
+            if (order > 20) break;
+        }
+
+        return Ok(new
+        {
+            fileId,
+            questions,
+            progress = 90,
+            message = "Quiz sorulari uretildi."
+        });
+    }
+
 
     [HttpPost("{fileId}/finalize")]
     public IActionResult Finalize(string fileId, [FromBody] FinalizeImportRequest request)
@@ -251,16 +426,41 @@ public class BookImportController : ControllerBase//controllerbase http cevaplar
                                                                 pdf i sileceği için önce kontrol et */
 
         var city = _cities.EnsureCity(request.City ?? "");
+        var category = _categories.EnsureCategory(request.Category ?? "");
 
         var book = new Book
         {
             Title = request.Title.Trim(),
             Author = request.Author.Trim(),
-            Category = (request.Category ?? "").Trim(),
-            City = city.Name    //id vermşyoruz sql insert sonrası olacak
+            Category = category.Name,
+            City = city.Name,    //id vermşyoruz sql insert sonrası olacak
+            Summary = request.Summary ?? "",//AI ozeti
+            CoverUrl = request.CoverUrl ?? ""//Open Library kapak URL
         };
 
         var bookId = _books.InsertBook(book);
+
+        // quiz endpointinden gelen sorulari kitaba bagla (en fazla 20)
+        if (request.Questions != null)
+        {
+            var sort = 1;
+            foreach (var q in request.Questions.Take(20))
+            {
+                _quiz.InsertQuestion(new QuizQuestion
+                {
+                    BookId = bookId,
+                    QuestionText = q.QuestionText ?? "",
+                    OptionA = q.OptionA ?? "",
+                    OptionB = q.OptionB ?? "",
+                    OptionC = q.OptionC ?? "",
+                    OptionD = q.OptionD ?? "",
+                    CorrectOption = q.CorrectOption ?? "",
+                    Explanation = q.Explanation ?? "",
+                    SortOrder = q.SortOrder > 0 ? q.SortOrder : sort
+                });
+                sort++;
+            }
+        }
 
         System.IO.File.Delete(pdfPath);//geçici pdf i sil 
 
@@ -296,9 +496,38 @@ public class FinalizeImportRequest // Body için DTO/ istek modeli
     public string Title { get; set; }
     public string Author { get; set; }
     public string Category { get; set; }
+    public string Summary { get; set; } = "";//AI ozeti
+    public string CoverUrl { get; set; } = "";//kapak URL
+    public List<QuizQuestionDto> Questions { get; set; } = new();//20 quiz sorusu
     
 }
 
+// finalize body icindeki tek soru modeli
+public class QuizQuestionDto
+{
+    public string QuestionText { get; set; } = "";
+    public string OptionA { get; set; } = "";
+    public string OptionB { get; set; } = "";
+    public string OptionC { get; set; } = "";
+    public string OptionD { get; set; } = "";
+    public string CorrectOption { get; set; } = "";// A/B/C/D
+    public string Explanation { get; set; } = "";
+    public int SortOrder { get; set; }
+}
+
+public class QuizImportRequest
+{
+    public string Title { get; set; } = "";
+    public string Author { get; set; } = "";
+    public string Summary { get; set; } = "";
+}
+
+
+public class CoverImportRequest
+{
+    public string Title { get; set; } = "";
+    public string Author { get; set; } = "";
+}
 
 //neden ayri classlar kullandık kullanmasak bu kadar net okumazdı bodyi elle parçalamak gerirdi ZOR
 

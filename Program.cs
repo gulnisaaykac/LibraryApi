@@ -29,6 +29,7 @@ builder.Services.AddScoped<Library.DataAccess.BookRepository>();
 builder.Services.AddScoped<Library.DataAccess.CategoryRepository>();
 builder.Services.AddScoped<Library.DataAccess.UserRepository>();
 builder.Services.AddScoped<Library.DataAccess.CityRepository>();
+builder.Services.AddScoped<Library.DataAccess.QuizRepository>();
 
 builder.Services.AddCors(options =>
 {
