@@ -11,11 +11,13 @@ public class BooksController : ControllerBase
 {
     private readonly BookRepository _books;
     private readonly CategoryRepository _categories;
+    private readonly QuizRepository _quiz;
 
-    public BooksController(BookRepository books, CategoryRepository categories)
+    public BooksController(BookRepository books, CategoryRepository categories, QuizRepository quiz)
     {
         _books = books;
         _categories = categories;
+        _quiz= quiz;
         //dışardan gelen veritabanı bağlantısını bu controller a kaydeder
     }
 
@@ -36,6 +38,16 @@ public class BooksController : ControllerBase
 
         return book;
     }
+
+    [HttpGet("{id:int}/quiz")]
+    public ActionResult<List<QuizQuestion>> GetQuiz(int id)
+    {
+        var book =_books.GetBookById(id);
+        if (book==null)
+            return NotFound();
+
+        return _quiz.GetByBookId(id);
+    } 
 
     [Authorize(Roles = "Admin")]
     [HttpPost]
