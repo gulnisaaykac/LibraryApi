@@ -35,7 +35,8 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("Angular", policy =>
     {
-        policy.WithOrigins("http://localhost:4200")
+        // Minikube UI origin degisken; nginx proxy ayni origin kullanir
+        policy.AllowAnyOrigin()
               .AllowAnyHeader()
               .AllowAnyMethod();
     });
@@ -51,7 +52,11 @@ if (app.Environment.IsDevelopment())
 app.UseCors("Angular");
 app.UseAuthentication();
 app.UseAuthorization();
-app.UseHttpsRedirection();
+// Production/Minikube HTTP; https redirect 404/loop yapmasin
+if (!app.Environment.IsProduction())
+{
+    app.UseHttpsRedirection();
+}
 app.UseDefaultFiles();
 app.UseStaticFiles();
 app.MapControllers();
